@@ -1,0 +1,23 @@
+[package]
+name = "dsh-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "DeepSeek Harness desktop entry: always-latest runtime host with its own WebView2 window."
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["tls", "json"] }
+zip = { version = "2", default-features = false, features = ["deflate", "time"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

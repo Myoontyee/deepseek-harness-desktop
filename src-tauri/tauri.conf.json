@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DeepSeek Harness",
+  "version": "0.1.0",
+  "identifier": "ai.deepseek.harness",
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "http://127.0.0.1:3080",
+    "beforeBuildCommand": "",
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "DeepSeek Harness",
+        "url": "index.html",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": ["../tools"],
+    "shortDescription": "DeepSeek Harness 桌面端：下载即用，自动保持最新版",
+    "longDescription": "内置 Node.js 与 pnpm 的 DeepSeek Harness 桌面入口。首次打开自动下载 Harness 最新代码并构建，之后每次启动自动更新。无需安装 Node、pnpm 或 git。",
+    "category": "DeveloperTool",
+    "copyright": "Copyright (c) 2026 DeepSeek",
+    "nsis": {
+      "installMode": "currentUser",
+      "languages": ["SimpChinese", "English"]
+    }
+  }
+}
