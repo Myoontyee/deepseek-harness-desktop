@@ -699,6 +699,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "ureq",
+ "winreg",
  "zip",
 ]
 

@@ -132,20 +132,65 @@ fn git_out(git: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
     }
 }
 
+/// Read the Windows WinINET system proxy (what Clash Verge sets when
+/// "系统代理" is enabled): HKCU\...\Internet Settings\ProxyEnable + ProxyServer.
+/// Returns e.g. "http://127.0.0.1:7897" so git subprocesses can honor it even
+/// when no git-level proxy is configured.
+fn system_proxy_url() -> Option<String> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = hkcu
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        .ok()?;
+    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
+    if enabled == 0 {
+        return None;
+    }
+    let server: String = settings.get_value("ProxyServer").ok()?;
+    if server.is_empty() {
+        return None;
+    }
+    // ProxyServer may be "host:port" or a per-protocol list like
+    // "http=host:port;https=host:port". Prefer the plain form.
+    if server.contains('=') {
+        for entry in server.split(';') {
+            if let Some((proto, addr)) = entry.split_once('=') {
+                if proto.eq_ignore_ascii_case("http") || proto.eq_ignore_ascii_case("https") {
+                    return Some(format!("http://{addr}"));
+                }
+            }
+        }
+        return None;
+    }
+    Some(format!("http://{server}"))
+}
+
 /// Run a git command with a hard deadline: a slow/unreachable remote must not
 /// leave the boot flow hanging forever. Kills the child and reports the
-/// timeout when the deadline passes.
+/// timeout when the deadline passes. Injects the Windows system proxy (Clash
+/// etc.) into the child's environment so git can reach GitHub without manual
+/// git-level proxy configuration.
 fn git_out_timeout(
     git: &Path,
     cwd: &Path,
     args: &[&str],
     timeout: Duration,
 ) -> Result<String, String> {
-    let mut child = Command::new(git)
+    let mut command = Command::new(git);
+    command
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(proxy) = system_proxy_url() {
+        command
+            .env("HTTPS_PROXY", &proxy)
+            .env("HTTP_PROXY", &proxy)
+            .env("https_proxy", &proxy)
+            .env("http_proxy", &proxy);
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| format!("无法启动 git：{error}"))?;
     let start = Instant::now();
@@ -259,7 +304,7 @@ fn download_zip(runtime: &Path, sha: &str) -> Result<(), String> {
     );
     let response = ureq::get(&url)
         .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(900))
+        .timeout(Duration::from_secs(120))
         .call()
         .map_err(|e| format!("下载失败：{e}"))?;
     let mut bytes = Vec::new();
@@ -268,6 +313,9 @@ fn download_zip(runtime: &Path, sha: &str) -> Result<(), String> {
         .take(2 * 1024 * 1024 * 1024)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("读取下载内容失败：{e}"))?;
+    if bytes.is_empty() {
+        return Err("下载内容为空（网络可能不可达）".into());
+    }
 
     let zip_path = runtime.with_extension("zip");
     std::fs::write(&zip_path, &bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
