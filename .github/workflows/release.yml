@@ -36,7 +36,10 @@ jobs:
           Write-Host "bundled pnpm: $(& 'tools\pnpm.exe' --version)"
 
       - name: Build installer (NSIS)
-        run: pnpm dlx @tauri-apps/cli@2 build --bundles nsis
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE\tools;$env:PATH"
+          pnpm dlx @tauri-apps/cli@2 build --bundles nsis
 
       - name: Upload installer to Release
         uses: softprops/action-gh-release@v2
