@@ -29,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": ["nsis", "dmg", "appimage", "deb"],
     "resources": {
       "../tools/": "tools/",
       "dsh-runtime-snapshot.zip": "dsh-runtime-snapshot.zip"

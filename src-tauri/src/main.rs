@@ -21,7 +21,10 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(not(windows))]
+use std::os::unix::process::CommandExt as UnixCommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -99,17 +102,27 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 }
 
 fn find_git() -> Option<PathBuf> {
-    if let Some(git) = find_on_path("git.exe") {
-        return Some(git);
-    }
-    [
+    #[cfg(windows)]
+    let candidates: &[&str] = &[
         r"C:\Program Files\Git\cmd\git.exe",
         r"C:\Program Files (x86)\Git\cmd\git.exe",
         r"C:\Program Files\Git\bin\git.exe",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|p| p.exists())
+    ];
+    #[cfg(not(windows))]
+    let candidates: &[&str] = &[
+        "/usr/bin/git",
+        "/usr/local/bin/git",
+        "/opt/homebrew/bin/git",
+        "/opt/local/bin/git",
+    ];
+    let name = if cfg!(windows) { "git.exe" } else { "git" };
+    if let Some(git) = find_on_path(name) {
+        return Some(git);
+    }
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
 }
 
 fn prepend_path(tools: &Path) -> String {
@@ -120,6 +133,25 @@ fn prepend_path(tools: &Path) -> String {
     std::env::join_paths(paths)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// Bundled pnpm executable: `pnpm.exe` on Windows, `pnpm` elsewhere.
+fn pnpm_bin(tools: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let name = "pnpm.exe";
+    #[cfg(not(windows))]
+    let name = "pnpm";
+    tools.join(name)
+}
+
+/// Bundled node executable: `node\node.exe` on Windows, `node\bin\node` on
+/// macOS/Linux (the official tarball layout).
+fn node_bin(tools: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let rel = ["node", "node.exe"];
+    #[cfg(not(windows))]
+    let rel = ["node", "bin", "node"];
+    rel.iter().fold(tools.to_path_buf(), |acc, part| acc.join(part))
 }
 
 /// Run a git command in `cwd`; return trimmed stdout on success.
@@ -137,7 +169,10 @@ fn git_out(git: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
 /// Read the Windows WinINET system proxy (what Clash Verge sets when
 /// "系统代理" is enabled): HKCU\...\Internet Settings\ProxyEnable + ProxyServer.
 /// Returns e.g. "http://127.0.0.1:7897" so git subprocesses can honor it even
-/// when no git-level proxy is configured.
+/// when no git-level proxy is configured. On macOS/Linux the standard
+/// HTTP_PROXY/HTTPS_PROXY environment variables are inherited by subprocesses
+/// automatically, so no registry lookup is needed there.
+#[cfg(windows)]
 fn system_proxy_url() -> Option<String> {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
@@ -166,6 +201,11 @@ fn system_proxy_url() -> Option<String> {
         return None;
     }
     Some(format!("http://{server}"))
+}
+
+#[cfg(not(windows))]
+fn system_proxy_url() -> Option<String> {
+    None
 }
 
 /// Run a git command with a hard deadline: a slow/unreachable remote must not
@@ -652,34 +692,45 @@ fn fallback_port(preferred: u16) -> u16 {
     (preferred..preferred + 20).find(|p| port_free(*p)).unwrap_or(preferred)
 }
 
-/// Start `pnpm dsh web` with no console window at all (CREATE_NO_WINDOW),
-/// redirecting its output to `server.log` for diagnostics.
+/// Start `pnpm dsh web`, redirecting its output to `server.log` for
+/// diagnostics. On Windows no console window is created (CREATE_NO_WINDOW) and
+/// the server is spawned in its own process group so the whole tree can be
+/// killed on exit; on macOS/Linux the server runs in the foreground process
+/// group of the app (no extra console concept exists there).
 ///
 /// The server is spawned directly (no cmd/`start` indirection, so no shell
-/// quoting pitfalls) and its lifecycle is tied to the app: when the window
-/// closes, the whole process tree is killed.
+/// quoting pitfalls) and its lifecycle is tied to the app: when the app
+/// exits, the whole process tree is killed.
 fn start_server(pnpm: &Path, runtime: &Path, tools: &Path, port: u16) -> Option<std::process::Child> {
     let log = std::fs::File::create(runtime.join("server.log")).ok()?;
     let stdout = Stdio::from(log.try_clone().ok()?);
     let stderr = Stdio::from(log);
-    Command::new(pnpm)
+    let mut command = Command::new(pnpm);
+    command
         .args(["dsh", "web", "--port", &port.to_string()])
         .current_dir(runtime)
         .env("PATH", prepend_path(tools))
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no console, ever
         .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .ok()
+        .stderr(stderr);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console, ever
+    #[cfg(not(windows))]
+    command.process_group(0); // own process group so kill_tree can stop the tree
+    command.spawn().ok()
 }
 
-/// Kill a process tree on Windows (`taskkill /T`), used to stop the server
-/// together with the app.
+/// Kill a process tree used to stop the server together with the app.
+/// Windows: `taskkill /T /F`. macOS/Linux: signal the whole process group.
 fn kill_tree(pid: u32) {
+    #[cfg(windows)]
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .creation_flags(0x0800_0000)
         .spawn();
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill").args(["-TERM", &format!("-{pid}")]).spawn();
+    }
 }
 
 // --- UI plumbing -----------------------------------------------------------
@@ -743,10 +794,16 @@ fn run(app: &AppHandle, window: WebviewWindow) {
     thread::sleep(Duration::from_millis(1200));
 
     let tools = tools_dir();
-    let pnpm = tools.join("pnpm.exe");
-    let node = tools.join("node").join("node.exe");
+    let pnpm = pnpm_bin(&tools);
+    let node = node_bin(&tools);
     if !pnpm.exists() || !node.exists() {
-        return fail(&window, "运行时组件缺失：未找到 tools/pnpm.exe 或 tools/node，请重新安装应用");
+        return fail(
+            &window,
+            &format!(
+                "运行时组件缺失：未找到 tools/{} 或 tools/node，请重新安装应用",
+                pnpm.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "pnpm".into())
+            ),
+        );
     }
 
     let runtime = runtime_dir();

@@ -3,52 +3,93 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-windows:
-    name: Build Windows installer
-    runs-on: windows-latest
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip
+            node_archive: node-v22.23.2-win-x64
+            pnpm_url: https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-win32-x64.zip
+          - os: macos-13
+            node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-x64.tar.gz
+            node_archive: node-v22.23.2-darwin-x64
+            pnpm_url: https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-darwin-x64.tar.gz
+          - os: macos-latest
+            node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-arm64.tar.gz
+            node_archive: node-v22.23.2-darwin-arm64
+            pnpm_url: https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-darwin-arm64.tar.gz
+          - os: ubuntu-latest
+            node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.gz
+            node_archive: node-v22.23.2-linux-x64
+            pnpm_url: https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-linux-x64.tar.gz
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust (MSVC)
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Prepare bundled tools (portable Node + pnpm)
-        shell: pwsh
+        shell: bash
         run: |
-          $nodeZip = Join-Path $env:TEMP 'node.zip'
-          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip' -OutFile $nodeZip
-          Expand-Archive $nodeZip (Join-Path $env:TEMP 'node')
-          New-Item -ItemType Directory -Force -Path 'tools/node' | Out-Null
-          Copy-Item (Join-Path $env:TEMP 'node\node-v22.23.2-win-x64\*') 'tools/node' -Recurse -Force
-          $pnpmZip = Join-Path $env:TEMP 'pnpm.zip'
-          Invoke-WebRequest -Uri 'https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-win32-x64.zip' -OutFile $pnpmZip
-          Expand-Archive $pnpmZip 'tools'
-          Write-Host "bundled node: $(& 'tools\node\node.exe' --version)"
-          Write-Host "bundled pnpm: $(& 'tools\pnpm.exe' --version)"
+          set -e
+          mkdir -p tools
+          case "${{ matrix.os }}" in
+            windows-latest)
+              curl -sL -o "$RUNNER_TEMP/node.zip" "${{ matrix.node_url }}"
+              unzip -q "$RUNNER_TEMP/node.zip" -d "$RUNNER_TEMP"
+              mv "$RUNNER_TEMP/${{ matrix.node_archive }}" tools/node
+              curl -sL -o "$RUNNER_TEMP/pnpm.zip" "${{ matrix.pnpm_url }}"
+              unzip -q "$RUNNER_TEMP/pnpm.zip" -d tools
+              ;;
+            *)
+              curl -sL -o "$RUNNER_TEMP/node.tar.gz" "${{ matrix.node_url }}"
+              mkdir -p tools/node
+              tar -xzf "$RUNNER_TEMP/node.tar.gz" -C tools/node --strip-components=1
+              curl -sL -o "$RUNNER_TEMP/pnpm.tar.gz" "${{ matrix.pnpm_url }}"
+              mkdir -p "$RUNNER_TEMP/pnpm-x"
+              tar -xzf "$RUNNER_TEMP/pnpm.tar.gz" -C "$RUNNER_TEMP/pnpm-x"
+              cp "$RUNNER_TEMP/pnpm-x/pnpm" tools/pnpm
+              chmod +x tools/pnpm
+              ;;
+          esac
+          echo "node: $("$PWD/tools/node/bin/node" --version 2>/dev/null || "$PWD/tools/node/node.exe" --version)"
+          echo "pnpm: $("$PWD/tools/pnpm" --version 2>/dev/null || "$PWD/tools/pnpm.exe" --version)"
 
       - name: Download official source snapshot (bundled for offline first run)
-        shell: pwsh
+        shell: bash
         run: |
-          curl.exe -L --fail --retry 3 --connect-timeout 30 -o 'src-tauri/dsh-runtime-snapshot.zip' 'https://codeload.github.com/deepseek-ai/deepseek-harness/zip/refs/heads/master'
-          Write-Host "snapshot size: $((Get-Item 'src-tauri/dsh-runtime-snapshot.zip').Length)"
+          curl -sL --fail --retry 3 --connect-timeout 30 \
+            -o src-tauri/dsh-runtime-snapshot.zip \
+            'https://codeload.github.com/deepseek-ai/deepseek-harness/zip/refs/heads/master'
+          ls -la src-tauri/dsh-runtime-snapshot.zip
 
-      - name: Build installer (NSIS)
-        shell: pwsh
+      - name: Build installer
+        shell: bash
         run: |
-          $env:PATH = "$env:GITHUB_WORKSPACE\tools;$env:PATH"
-          pnpm dlx @tauri-apps/cli@2 build --bundles nsis
+          export PATH="$PWD/tools:$PATH"
+          pnpm dlx @tauri-apps/cli@2 build
 
-      - name: Upload installer to Release
+      - name: Upload artifacts to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/bundle/nsis/*setup.exe
+          files: |
+            src-tauri/target/release/bundle/nsis/*setup.exe
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
           generate_release_notes: true
