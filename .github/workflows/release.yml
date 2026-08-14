@@ -29,7 +29,9 @@ jobs:
           Expand-Archive $nodeZip (Join-Path $env:TEMP 'node')
           New-Item -ItemType Directory -Force -Path 'tools/node' | Out-Null
           Copy-Item (Join-Path $env:TEMP 'node\node-v22.23.2-win-x64\*') 'tools/node' -Recurse -Force
-          Invoke-WebRequest -Uri 'https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-win32-x64.exe' -OutFile 'tools/pnpm.exe'
+          $pnpmZip = Join-Path $env:TEMP 'pnpm.zip'
+          Invoke-WebRequest -Uri 'https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-win32-x64.zip' -OutFile $pnpmZip
+          Expand-Archive $pnpmZip 'tools'
           Write-Host "bundled node: $(& 'tools\node\node.exe' --version)"
           Write-Host "bundled pnpm: $(& 'tools\pnpm.exe' --version)"
 
