@@ -21,6 +21,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -354,6 +355,60 @@ fn build_repo(
     Ok(())
 }
 
+/// The web boot's immediate tier loads client plugin bundles from /plugins
+/// right after the root page answers. On a freshly started server the root can
+/// 200 before those routes are fully live, and a first-load module failure
+/// leaves the whole plugin graph pending on base services (connection, typert,
+/// remote, ...). Poll a known plugin bundle until it answers before navigating.
+fn server_plugins_ready(port: u16) -> bool {
+    const PLUGIN_PATH: &str = "/plugins/@deepseek-ai/dsh-typert-registry/client.js";
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let request = format!(
+                "GET {PLUGIN_PATH} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+            );
+            if stream.write_all(request.as_bytes()).is_ok() {
+                let mut buf = [0u8; 64];
+                if stream.read(&mut buf).is_ok()
+                    && String::from_utf8_lossy(&buf[..]).contains("200")
+                {
+                    return true;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(750));
+    }
+    false
+}
+
+/// Web boot watchdog: if the first page load races the plugin-module serving
+/// and the boot fails (whole plugin graph pending), the failure report is
+/// rendered by AppRoot with the literal "Failed to load plugins" title. Reload
+/// the page — the retry lands on a warm server. At most a few attempts.
+fn watch_boot_failure(window: &WebviewWindow) {
+    let window = window.clone();
+    thread::spawn(move || {
+        let mut reloads = 0u8;
+        loop {
+            thread::sleep(Duration::from_secs(4));
+            if reloads >= 3 {
+                return;
+            }
+            eval_js(
+                &window,
+                "if (document.body && document.body.innerText \
+                 && document.body.innerText.indexOf('Failed to load plugins') !== -1) \
+                 { location.reload() }",
+            );
+            reloads += 1;
+            // Give a reloaded page time to boot before the next probe.
+            thread::sleep(Duration::from_secs(20));
+        }
+    });
+}
+
 fn server_ready(port: u16) -> bool {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;
@@ -372,22 +427,33 @@ fn server_ready(port: u16) -> bool {
     String::from_utf8_lossy(&buf[..n]).contains("200")
 }
 
-/// Start `pnpm dsh web` in a minimized titled console using the bundled node.
+/// Start `pnpm dsh web` with no console window at all (CREATE_NO_WINDOW),
+/// redirecting its output to `server.log` for diagnostics.
 ///
-/// The launcher writes a .cmd file with the exact command and spawns it via
-/// `cmd /c`: quoting inside a file is unambiguous, while passing quoted args
-/// through Rust's Windows command-line building mangles them for cmd.exe.
-fn start_server(pnpm: &Path, runtime: &Path, tools: &Path, port: u16) {
-    let script = runtime.join("start-desktop-server.cmd");
-    let content = format!(
-        "@echo off\r\nstart \"DeepSeek Harness Server\" /min cmd /c \"\"{}\" dsh web --port {port}\"\r\n",
-        pnpm.display()
-    );
-    let _ = std::fs::write(&script, content);
-    let _ = Command::new("cmd")
-        .args(["/c", script.to_str().unwrap_or_default()])
+/// The server is spawned directly (no cmd/`start` indirection, so no shell
+/// quoting pitfalls) and its lifecycle is tied to the app: when the window
+/// closes, the whole process tree is killed.
+fn start_server(pnpm: &Path, runtime: &Path, tools: &Path, port: u16) -> Option<std::process::Child> {
+    let log = std::fs::File::create(runtime.join("server.log")).ok()?;
+    let stdout = Stdio::from(log.try_clone().ok()?);
+    let stderr = Stdio::from(log);
+    Command::new(pnpm)
+        .args(["dsh", "web", "--port", &port.to_string()])
         .current_dir(runtime)
         .env("PATH", prepend_path(tools))
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no console, ever
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .ok()
+}
+
+/// Kill a process tree on Windows (`taskkill /T`), used to stop the server
+/// together with the app.
+fn kill_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(0x0800_0000)
         .spawn();
 }
 
@@ -427,6 +493,17 @@ fn fail(window: &WebviewWindow, message: &str) {
     eval_js(window, &format!("showError({})", js_string(message)));
 }
 
+/// Show both versions on the boot page: the official harness version (runtime
+/// package.json) and this desktop shell's own version (crate version / tag).
+fn show_version(window: &WebviewWindow, runtime: &Path) {
+    let harness = std::fs::read_to_string(runtime.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|json| json.get("version").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    eval_js(window, &format!("setVersion({}, {})", js_string(&harness), js_string(env!("CARGO_PKG_VERSION"))));
+}
+
 // --- boot flow -------------------------------------------------------------
 
 fn run(app: &AppHandle, window: WebviewWindow) {
@@ -443,6 +520,8 @@ fn run(app: &AppHandle, window: WebviewWindow) {
     let runtime = runtime_dir();
     let p = port();
     let git = find_git();
+
+    show_version(&window, &runtime);
 
     let state = match ensure_runtime(git.as_deref(), &runtime, &|s| set_status(&window, s)) {
         Ok(state) => state,
@@ -463,8 +542,14 @@ fn run(app: &AppHandle, window: WebviewWindow) {
         return fail(&window, &format!("构建失败：{e}"));
     }
 
-    set_status(&window, "正在启动服务…");
-    start_server(&pnpm, &runtime, &tools, p);
+    let server = app.state::<ServerState>();
+    let mut started_own = false;
+    if !server_ready(p) {
+        set_status(&window, "正在启动服务…");
+        let mut slot = server.0.lock().expect("server slot lock");
+        *slot = start_server(&pnpm, &runtime, &tools, p);
+        started_own = true;
+    }
 
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     while Instant::now() < deadline {
@@ -476,6 +561,14 @@ fn run(app: &AppHandle, window: WebviewWindow) {
     if !server_ready(p) {
         return fail(&window, "服务启动超时（120 秒）。请检查网络后重新打开应用");
     }
+    let _ = started_own;
+
+    // A freshly started server can answer the root page before its /plugins
+    // routes are fully live; loading the app in that window leaves the plugin
+    // graph pending on base services. Wait for a known plugin bundle to answer
+    // before navigating (a warm server passes in ~1s).
+    set_status(&window, "正在启动 DeepSeek Harness…");
+    server_plugins_ready(p);
 
     set_status(&window, "正在打开 DeepSeek Harness…");
     let url = format!("http://127.0.0.1:{p}");
@@ -488,16 +581,38 @@ fn run(app: &AppHandle, window: WebviewWindow) {
             }
         }
     });
+    // Belt and suspenders: if the first load still fails to boot, reload.
+    watch_boot_failure(&window);
 }
 
+/// The app-started server child (None when an already-running server was reused).
+struct ServerState(std::sync::Mutex<Option<std::process::Child>>);
+
 fn main() {
+    let server = ServerState(std::sync::Mutex::new(None));
     tauri::Builder::default()
+        .manage(server)
         .setup(|app| {
             let handle = app.handle().clone();
             let window = app.get_webview_window("main").expect("main window must exist");
             thread::spawn(move || run(&handle, window));
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("failed to run DeepSeek Harness desktop entry");
+        .build(tauri::generate_context!())
+        .expect("failed to build DeepSeek Harness desktop entry")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                // Stop the server together with the app: no orphan processes,
+                // no visible console. A server the user started themselves
+                // (port already up on launch) is left untouched.
+                let child = {
+                    let state = app.state::<ServerState>();
+                    let mut guard = state.0.lock().expect("server slot lock");
+                    guard.take()
+                };
+                if let Some(child) = child {
+                    kill_tree(child.id());
+                }
+            }
+        });
 }

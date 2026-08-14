@@ -2,3 +2,6 @@ target/
 src-tauri/gen/
 tools/
 *.log
+
+# Local deployment artifacts (portable exe + tools + installer)
+main/
