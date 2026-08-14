@@ -1,6 +1,13 @@
 # DeepSeek Harness Desktop
 
-> DeepSeek Harness 的桌面端入口——**下载、安装、双击，就是 DeepSeek Harness**，并且永远是最新版。
+<p align="center">
+  <strong>DeepSeek Harness 的桌面端入口</strong>——下载、安装、双击，就是 DeepSeek Harness，并且永远是最新版。
+</p>
+
+<p align="center">
+  基于 <a href="https://github.com/deepseek-ai/deepseek-harness">deepseek-ai/deepseek-harness</a> 官方项目的非官方桌面壳
+  （Tauri 2 + WebView2），自动同步官方 <code>master</code> 分支。
+</p>
 
 一个基于 [Tauri 2](https://tauri.app) + WebView2 的轻量桌面壳（约 3MB）。它本身不携带任何 Harness 代码快照：每次启动检查 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 官方仓库的最新提交，自动拉取、安装依赖、构建、启动服务，并在独立窗口中打开 Web GUI。**主仓更新即应用更新**，无需手动升级。
 
@@ -18,7 +25,7 @@
 
 ## 📸 预览
 
-| 启动页（杂志风白底，显示双版本号） | 主界面 |
+| 启动页 | 主界面 |
 | --- | --- |
 | ![启动页](docs/boot-page.png) | ![主界面](docs/app-ui.png) |
 

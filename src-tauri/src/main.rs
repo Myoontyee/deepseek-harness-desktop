@@ -27,7 +27,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
 
 const SOURCE_URL: &str = "https://github.com/deepseek-ai/deepseek-harness.git";
 const SOURCE_BRANCH: &str = "master";
@@ -617,6 +619,9 @@ fn watch_boot_failure(window: &WebviewWindow) {
     });
 }
 
+/// True when a dsh service answers on the port. Requires both HTTP 200 and
+/// the harness boot manifest marker, so a foreign web server squatting on the
+/// port is NOT mistaken for our service (and triggers port fallback instead).
 fn server_ready(port: u16) -> bool {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;
@@ -628,11 +633,23 @@ fn server_ready(port: u16) -> bool {
     {
         return false;
     }
-    let mut buf = [0u8; 64];
+    let mut buf = [0u8; 2048];
     let Ok(n) = stream.read(&mut buf) else {
         return false;
     };
-    String::from_utf8_lossy(&buf[..n]).contains("200")
+    let head = String::from_utf8_lossy(&buf[..n]);
+    head.contains("200") && (head.contains("__DSH_BOOT__") || head.contains("DeepSeek Harness"))
+}
+
+/// Whether the preferred port is free to bind (nothing else is listening).
+fn port_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// First free port starting at `preferred` (up to +20), or `preferred` if
+/// everything in range is taken.
+fn fallback_port(preferred: u16) -> u16 {
+    (preferred..preferred + 20).find(|p| port_free(*p)).unwrap_or(preferred)
 }
 
 /// Start `pnpm dsh web` with no console window at all (CREATE_NO_WINDOW),
@@ -733,8 +750,16 @@ fn run(app: &AppHandle, window: WebviewWindow) {
     }
 
     let runtime = runtime_dir();
-    let p = port();
+    let mut p = port();
     let git = find_git();
+
+    // Port conflict handling: if the preferred port is already serving a dsh
+    // instance (e.g. a manually started `dsh web`), reuse it; if it is taken
+    // by something else (foreign service), fall back to a free port.
+    if !server_ready(p) && !port_free(p) {
+        p = fallback_port(p + 1);
+        set_status(&window, &format!("端口 {p} 被占用，已切换到 {p}"));
+    }
 
     let on_progress = |pct: u32| {
         set_status(&window, &format!("正在使用内置代码初始化… {pct}%"));
@@ -812,10 +837,68 @@ struct ServerState(std::sync::Mutex<Option<std::process::Child>>);
 fn main() {
     let server = ServerState(std::sync::Mutex::new(None));
     tauri::Builder::default()
+        // Single instance: a second launch focuses the existing window instead
+        // of opening a duplicate (which previously double-started servers).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(server)
         .setup(|app| {
             let handle = app.handle().clone();
             let window = app.get_webview_window("main").expect("main window must exist");
+
+            // Closing the window hides it to the tray instead of exiting: the
+            // server keeps serving, and the app stays one click away.
+            let tray_window = window.clone();
+            window.on_window_event(move |event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = tray_window.hide();
+                }
+            });
+
+            // System tray: left-click shows the window, menu shows/exits.
+            let show_item =
+                MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", "退出 DeepSeek Harness", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let _tray = TrayIconBuilder::with_id("dsh-tray")
+                .icon(app.default_window_icon().expect("app icon missing").clone())
+                .tooltip("DeepSeek Harness")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.unminimize();
+                            let _ = win.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(win) = tray.app_handle().get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.unminimize();
+                            let _ = win.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             thread::spawn(move || run(&handle, window));
             Ok(())
         })
