@@ -90,10 +90,11 @@ jobs:
 
       - name: Build installer
         shell: bash
-        env:
-          CARGO_BUILD_JOBS: ${{ matrix.cargo_jobs }}
         run: |
           export PATH="$PWD/tools:$PATH"
+          if [ -n "${{ matrix.cargo_jobs }}" ]; then
+            export CARGO_BUILD_JOBS="${{ matrix.cargo_jobs }}"
+          fi
           pnpm dlx @tauri-apps/cli@2 build
 
       - name: Upload artifacts to Release
