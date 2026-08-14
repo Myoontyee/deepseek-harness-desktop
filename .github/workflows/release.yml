@@ -42,6 +42,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: Prepare bundled tools (portable Node + pnpm)
         shell: bash
@@ -60,10 +62,11 @@ jobs:
               curl -sL -o "$RUNNER_TEMP/node.tar.gz" "${{ matrix.node_url }}"
               mkdir -p tools/node
               tar -xzf "$RUNNER_TEMP/node.tar.gz" -C tools/node --strip-components=1
-              curl -sL -o "$RUNNER_TEMP/pnpm.tar.gz" "${{ matrix.pnpm_url }}"
-              mkdir -p "$RUNNER_TEMP/pnpm-x"
-              tar -xzf "$RUNNER_TEMP/pnpm.tar.gz" -C "$RUNNER_TEMP/pnpm-x"
-              cp "$RUNNER_TEMP/pnpm-x/pnpm" tools/pnpm
+              # The pnpm standalone tarballs are thin JS entry points; install
+              # the full npm package and shim tools/pnpm to run it with the
+              # bundled node.
+              npm install --prefix "$PWD/tools/pnpm-home" pnpm@11.7.0
+              printf '#!/usr/bin/env bash\nexec "$(dirname "$0")/node/bin/node" "$(dirname "$0")/pnpm-home/node_modules/pnpm/bin/pnpm.cjs" "$@"\n' > tools/pnpm
               chmod +x tools/pnpm
               ;;
           esac
