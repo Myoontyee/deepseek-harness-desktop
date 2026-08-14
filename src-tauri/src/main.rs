@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 const SOURCE_URL: &str = "https://github.com/deepseek-ai/deepseek-harness.git";
-const SOURCE_BRANCH: &str = "main";
+const SOURCE_BRANCH: &str = "master";
 const API_LATEST: &str = "https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/main";
 const APP_DIR_NAME: &str = "DeepSeekHarness";
 const RUNTIME_DIR_NAME: &str = "runtime";
