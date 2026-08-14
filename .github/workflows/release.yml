@@ -32,6 +32,7 @@ jobs:
             node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.gz
             node_archive: node-v22.23.2-linux-x64
             pnpm_url: https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-linux-x64.tar.gz
+            cargo_jobs: 2
 
     steps:
       - name: Checkout
@@ -89,6 +90,8 @@ jobs:
 
       - name: Build installer
         shell: bash
+        env:
+          CARGO_BUILD_JOBS: ${{ matrix.cargo_jobs }}
         run: |
           export PATH="$PWD/tools:$PATH"
           pnpm dlx @tauri-apps/cli@2 build
