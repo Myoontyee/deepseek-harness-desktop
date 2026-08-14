@@ -132,16 +132,51 @@ fn git_out(git: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
     }
 }
 
-/// Like `git_out`, but reports the trimmed stderr on failure (for diagnostics).
-fn git_out_detail(git: &Path, cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(git).args(args).current_dir(cwd)
-        .stdout(Stdio::piped()).stderr(Stdio::piped())
-        .output()
+/// Run a git command with a hard deadline: a slow/unreachable remote must not
+/// leave the boot flow hanging forever. Kills the child and reports the
+/// timeout when the deadline passes.
+fn git_out_timeout(
+    git: &Path,
+    cwd: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut child = Command::new(git)
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("无法启动 git：{error}"))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(handle) = child.stdout.as_mut() {
+                    let _ = handle.read_to_string(&mut stdout);
+                }
+                if let Some(handle) = child.stderr.as_mut() {
+                    let _ = handle.read_to_string(&mut stderr);
+                }
+                return if status.success() {
+                    Ok(stdout.trim().to_string())
+                } else {
+                    Err(stderr.trim().to_string())
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("等待 git 失败：{error}"));
+            }
+        }
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            return Err(format!("git 操作超时（{} 秒）", timeout.as_secs()));
+        }
+        thread::sleep(Duration::from_millis(500));
     }
 }
 
@@ -332,10 +367,11 @@ fn ensure_runtime(
                 }
                 let parent = runtime.parent().ok_or("runtime 路径没有父目录")?;
                 let clone_target = runtime.to_str().unwrap_or(RUNTIME_DIR_NAME);
-                match git_out_detail(
+                match git_out_timeout(
                     git,
                     parent,
                     &["clone", "--depth", "1", "--branch", SOURCE_BRANCH, &source, clone_target],
+                    Duration::from_secs(240),
                 ) {
                     Ok(_) => return Ok(RuntimeState::Fresh),
                     Err(error) => {
