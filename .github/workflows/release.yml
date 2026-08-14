@@ -35,6 +35,12 @@ jobs:
           Write-Host "bundled node: $(& 'tools\node\node.exe' --version)"
           Write-Host "bundled pnpm: $(& 'tools\pnpm.exe' --version)"
 
+      - name: Download official source snapshot (bundled for offline first run)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://codeload.github.com/deepseek-ai/deepseek-harness/zip/refs/heads/main' -OutFile 'src-tauri/dsh-runtime-snapshot.zip'
+          Write-Host "snapshot size: $((Get-Item 'src-tauri/dsh-runtime-snapshot.zip').Length)"
+
       - name: Build installer (NSIS)
         shell: pwsh
         run: |

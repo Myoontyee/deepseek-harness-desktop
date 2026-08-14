@@ -132,6 +132,19 @@ fn git_out(git: &Path, cwd: &Path, args: &[&str]) -> Option<String> {
     }
 }
 
+/// Like `git_out`, but reports the trimmed stderr on failure (for diagnostics).
+fn git_out_detail(git: &Path, cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(git).args(args).current_dir(cwd)
+        .stdout(Stdio::piped()).stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("无法启动 git：{error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
 /// Latest harness revision: the local source's HEAD in test mode, else the GitHub API.
 fn latest_sha(git: Option<&Path>) -> Option<String> {
     if local_source().is_some() {
@@ -162,6 +175,44 @@ fn current_sha(git: Option<&Path>, runtime: &Path) -> Option<String> {
         }
     }
     recorded_sha(runtime)
+}
+
+/// Path to the official-source snapshot bundled next to the exe, if present.
+fn bundled_snapshot_path() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe().ok()?.parent().map(Path::to_path_buf)?;
+    let snapshot = exe_dir.join("dsh-runtime-snapshot.zip");
+    snapshot.exists().then_some(snapshot)
+}
+
+/// Extract a source ZIP into `runtime`. Handles both codeload-style archives
+/// (one inner directory) and git-archive-style flat archives.
+fn extract_zip_into(zip_path: &Path, parent: &Path, runtime: &Path) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("打开内置代码失败：{e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解析内置代码失败：{e}"))?;
+    let extract_dir = parent.join("_dsh_snapshot_extract");
+    if extract_dir.exists() {
+        let _ = std::fs::remove_dir_all(&extract_dir);
+    }
+    std::fs::create_dir_all(&extract_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    archive
+        .extract(&extract_dir)
+        .map_err(|e| format!("解压内置代码失败：{e}"))?;
+    let entries: Vec<_> = std::fs::read_dir(&extract_dir)
+        .map_err(|e| format!("读取临时目录失败：{e}"))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("读取临时目录失败：{e}"))?;
+    let inner = if entries.len() == 1 && entries[0].file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        Some(entries[0].path())
+    } else {
+        None
+    };
+    let source = inner.unwrap_or_else(|| extract_dir.clone());
+    if runtime.exists() {
+        let _ = std::fs::remove_dir_all(runtime);
+    }
+    std::fs::rename(&source, runtime).map_err(|e| format!("整理目录失败：{e}"))?;
+    let _ = std::fs::write(runtime.join(".dsh-version"), "snapshot");
+    Ok(())
 }
 
 /// Download the repository as a ZIP (codeload) and extract it into `runtime`,
@@ -252,24 +303,62 @@ fn ensure_runtime(
         if skip_update() {
             return Err("DSH_SKIP_UPDATE 已设置，但本地没有可用的运行环境".into());
         }
-        on_status("首次运行：正在下载 DeepSeek Harness 最新代码…");
-        if let Some(git) = git {
+        // Bundled snapshot: the installer ships the official source as a ZIP
+        // next to the exe, so a fresh machine works even with no network.
+        if let Some(snapshot) = bundled_snapshot_path() {
+            on_status("正在使用内置代码初始化…");
+            let parent = runtime.parent().ok_or("runtime 路径没有父目录")?;
             if runtime.exists() {
                 let _ = std::fs::remove_dir_all(runtime);
             }
-            let parent = runtime.parent().ok_or("runtime 路径没有父目录")?;
-            let clone_target = runtime.to_str().unwrap_or(RUNTIME_DIR_NAME);
-            git_out(
-                git,
-                parent,
-                &["clone", "--depth", "1", "--branch", SOURCE_BRANCH, &source, clone_target],
-            )
-            .ok_or("下载代码失败（git clone）")?;
-            Ok(RuntimeState::Fresh)
-        } else {
-            let sha = latest_sha(git).unwrap_or_default();
-            download_zip(runtime, &sha)?;
-            Ok(RuntimeState::Fresh)
+            match extract_zip_into(&snapshot, parent, runtime) {
+                Ok(()) => return Ok(RuntimeState::Fresh),
+                Err(error) => {
+                    on_status(&format!("内置代码初始化失败（{error}），尝试在线下载…"));
+                    let _ = std::fs::remove_dir_all(runtime);
+                }
+            }
+        }
+
+        on_status("首次运行：正在下载 DeepSeek Harness 最新代码…");
+        // Prefer git clone (keeps the checkout updateable), but GitHub can be
+        // slow or unreachable from some networks. Retry once, then fall back
+        // to the ZIP download (codeload) before giving up.
+        let mut clone_error = String::new();
+        if let Some(git) = git {
+            for attempt in 0..2 {
+                if runtime.exists() {
+                    let _ = std::fs::remove_dir_all(runtime);
+                }
+                let parent = runtime.parent().ok_or("runtime 路径没有父目录")?;
+                let clone_target = runtime.to_str().unwrap_or(RUNTIME_DIR_NAME);
+                match git_out_detail(
+                    git,
+                    parent,
+                    &["clone", "--depth", "1", "--branch", SOURCE_BRANCH, &source, clone_target],
+                ) {
+                    Ok(_) => return Ok(RuntimeState::Fresh),
+                    Err(error) => {
+                        clone_error = error;
+                        on_status(&format!(
+                            "git 克隆失败（{}），正在尝试备用下载…",
+                            if attempt == 0 { "第 1 次" } else { "第 2 次" }
+                        ));
+                        thread::sleep(Duration::from_secs(3));
+                    }
+                }
+            }
+        }
+        // ZIP fallback: works without git and survives git-specific failures.
+        on_status("正在通过备用通道下载…");
+        let sha = latest_sha(git).unwrap_or_default();
+        match download_zip(runtime, &sha) {
+            Ok(()) => Ok(RuntimeState::Fresh),
+            Err(error) => Err(format!(
+                "下载代码失败：git clone 失败（{}），备用下载也失败（{}）",
+                if clone_error.is_empty() { "系统未安装 git" } else { &clone_error },
+                error
+            )),
         }
     }
 }

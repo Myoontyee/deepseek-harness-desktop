@@ -5,3 +5,5 @@ tools/
 
 # Local deployment artifacts (portable exe + tools + installer)
 main/
+src-tauri/dsh-runtime-snapshot.zip
+SetupBackage/
