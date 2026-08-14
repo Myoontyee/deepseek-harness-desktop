@@ -265,8 +265,14 @@ fn bundled_snapshot_path() -> Option<PathBuf> {
 }
 
 /// Extract a source ZIP into `runtime`. Handles both codeload-style archives
-/// (one inner directory) and git-archive-style flat archives.
-fn extract_zip_into(zip_path: &Path, parent: &Path, runtime: &Path) -> Result<(), String> {
+/// (one inner directory) and git-archive-style flat archives. Reports
+/// extraction progress (0-100) through `on_progress` when provided.
+fn extract_zip_into(
+    zip_path: &Path,
+    parent: &Path,
+    runtime: &Path,
+    on_progress: Option<&dyn Fn(u32)>,
+) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| format!("打开内置代码失败：{e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("解析内置代码失败：{e}"))?;
     let extract_dir = parent.join("_dsh_snapshot_extract");
@@ -274,9 +280,38 @@ fn extract_zip_into(zip_path: &Path, parent: &Path, runtime: &Path) -> Result<()
         let _ = std::fs::remove_dir_all(&extract_dir);
     }
     std::fs::create_dir_all(&extract_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
-    archive
-        .extract(&extract_dir)
-        .map_err(|e| format!("解压内置代码失败：{e}"))?;
+
+    // Progress: total uncompressed size vs bytes written so far.
+    let mut total: u64 = 0;
+    for i in 0..archive.len() {
+        if let Ok(entry) = archive.by_index(i) {
+            total += entry.size();
+        }
+    }
+    let mut done: u64 = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("读取内置代码条目失败：{e}"))?;
+        let size = entry.size();
+        if !entry.is_dir() {
+            if let Some(name) = entry.enclosed_name() {
+                let out_path = extract_dir.join(name);
+                if let Some(parent_dir) = out_path.parent() {
+                    std::fs::create_dir_all(parent_dir)
+                        .map_err(|e| format!("创建目录失败：{e}"))?;
+                }
+                let mut out = std::fs::File::create(&out_path)
+                    .map_err(|e| format!("写入内置代码失败：{e}"))?;
+                std::io::copy(&mut entry, &mut out)
+                    .map_err(|e| format!("写入内置代码失败：{e}"))?;
+            }
+        }
+        done += size;
+        if let Some(report) = on_progress {
+            let pct = if total > 0 { (done * 100 / total) as u32 } else { 100 };
+            report(pct.min(100));
+        }
+    }
+
     let entries: Vec<_> = std::fs::read_dir(&extract_dir)
         .map_err(|e| format!("读取临时目录失败：{e}"))?
         .collect::<Result<_, _>>()
@@ -342,6 +377,7 @@ fn ensure_runtime(
     git: Option<&Path>,
     runtime: &Path,
     on_status: &dyn Fn(&str),
+    on_progress: &dyn Fn(u32),
 ) -> Result<RuntimeState, String> {
     let source = local_source()
         .map(|p| p.to_string_lossy().to_string())
@@ -389,12 +425,11 @@ fn ensure_runtime(
         // Bundled snapshot: the installer ships the official source as a ZIP
         // next to the exe, so a fresh machine works even with no network.
         if let Some(snapshot) = bundled_snapshot_path() {
-            on_status("正在使用内置代码初始化…");
             let parent = runtime.parent().ok_or("runtime 路径没有父目录")?;
             if runtime.exists() {
                 let _ = std::fs::remove_dir_all(runtime);
             }
-            match extract_zip_into(&snapshot, parent, runtime) {
+            match extract_zip_into(&snapshot, parent, runtime, Some(on_progress)) {
                 Ok(()) => return Ok(RuntimeState::Fresh),
                 Err(error) => {
                     on_status(&format!("内置代码初始化失败（{error}），尝试在线下载…"));
@@ -701,7 +736,11 @@ fn run(app: &AppHandle, window: WebviewWindow) {
     let p = port();
     let git = find_git();
 
-    let state = match ensure_runtime(git.as_deref(), &runtime, &|s| set_status(&window, s)) {
+    let on_progress = |pct: u32| {
+        set_status(&window, &format!("正在使用内置代码初始化… {pct}%"));
+        eval_js(&window, &format!("setProgress({pct})"));
+    };
+    let state = match ensure_runtime(git.as_deref(), &runtime, &|s| set_status(&window, s), &on_progress) {
         Ok(state) => state,
         Err(e) => return fail(&window, &format!("准备运行环境失败：{e}")),
     };

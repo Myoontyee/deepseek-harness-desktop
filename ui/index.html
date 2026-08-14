@@ -121,6 +121,15 @@
         const el = document.getElementById('version');
         if (el) el.textContent = 'Harness ' + harness + ' · Desktop ' + desktop;
       }
+      // Deterministic progress (0-100) for extract/install phases; the thin bar
+      // becomes a real progress bar instead of the indeterminate slide.
+      function setProgress(pct) {
+        const bar = document.querySelector('.bar > i');
+        if (bar) {
+          bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+          bar.style.animation = 'none';
+        }
+      }
       function setStatus(text) {
         document.getElementById('status').textContent = text;
       }
