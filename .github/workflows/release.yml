@@ -94,6 +94,9 @@ jobs:
           export PATH="$PWD/tools:$PATH"
           if [ -n "${{ matrix.cargo_jobs }}" ]; then
             export CARGO_BUILD_JOBS="${{ matrix.cargo_jobs }}"
+            # Release-profile LTO links with very high memory on Linux runners;
+            # disable it there (binary grows a bit, build stays within RAM).
+            export CARGO_PROFILE_RELEASE_LTO=false
           fi
           pnpm dlx @tauri-apps/cli@2 build
 
