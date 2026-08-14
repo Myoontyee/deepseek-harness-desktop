@@ -584,13 +584,20 @@ fn fail(window: &WebviewWindow, message: &str) {
 
 /// Show both versions on the boot page: the official harness version (runtime
 /// package.json) and this desktop shell's own version (crate version / tag).
+/// When the harness version cannot be read yet, hide the line instead of
+/// showing a placeholder.
 fn show_version(window: &WebviewWindow, runtime: &Path) {
-    let harness = std::fs::read_to_string(runtime.join("package.json"))
+    match std::fs::read_to_string(runtime.join("package.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|json| json.get("version").and_then(|v| v.as_str()).map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string());
-    eval_js(window, &format!("setVersion({}, {})", js_string(&harness), js_string(env!("CARGO_PKG_VERSION"))));
+    {
+        Some(harness) => eval_js(
+            window,
+            &format!("setVersion({}, {})", js_string(&harness), js_string(env!("CARGO_PKG_VERSION"))),
+        ),
+        None => eval_js(window, "document.getElementById('version').style.visibility = 'hidden'"),
+    }
 }
 
 // --- boot flow -------------------------------------------------------------
@@ -610,12 +617,14 @@ fn run(app: &AppHandle, window: WebviewWindow) {
     let p = port();
     let git = find_git();
 
-    show_version(&window, &runtime);
-
     let state = match ensure_runtime(git.as_deref(), &runtime, &|s| set_status(&window, s)) {
         Ok(state) => state,
         Err(e) => return fail(&window, &format!("准备运行环境失败：{e}")),
     };
+
+    // The runtime is ready (or the bundled snapshot was extracted): only now
+    // can the real harness version be read from its package.json.
+    show_version(&window, &runtime);
 
     let sha = current_sha(git.as_deref(), &runtime).unwrap_or_default();
 
