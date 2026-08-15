@@ -1,5 +1,5 @@
 <h1 align="center">
-  <img src="docs/boot-page.png" width="96" alt="DeepSeek Harness Desktop" />
+  <img src="src-tauri/icons/icon.png" width="96" alt="DeepSeek Harness Desktop" />
   <br />
   DeepSeek Harness Desktop
 </h1>
@@ -23,6 +23,8 @@
 
 <p align="center">
   <a href="https://myoontyee.github.io/deepseek-harness-desktop"><strong>官方网站</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><strong>DeepSeek Harness 官方源码仓</strong></a>
 </p>
 
 ---
