@@ -20,10 +20,6 @@ jobs:
             node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-win-x64.zip
             node_archive: node-v22.23.2-win-x64
             pnpm_url: https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-win32-x64.zip
-          - os: macos-13
-            node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-x64.tar.gz
-            node_archive: node-v22.23.2-darwin-x64
-            pnpm_url: https://github.com/pnpm/pnpm/releases/download/v11.7.0/pnpm-darwin-x64.tar.gz
           - os: macos-latest
             node_url: https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-arm64.tar.gz
             node_archive: node-v22.23.2-darwin-arm64
