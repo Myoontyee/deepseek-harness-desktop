@@ -1367,6 +1367,14 @@ fn start_update_bridge(
                 let _ = reader.read_line(&mut line);
                 let method = line.split_whitespace().next().unwrap_or("").to_string();
                 let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                // CORS: the page origin (http://127.0.0.1:3080) is cross-origin
+                // to the bridge, so every response must carry the allow headers
+                // and preflight OPTIONS must be answered.
+                const CORS: &str = "\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type";
+                if method == "OPTIONS" {
+                    let _ = std::io::Write::write_all(&mut stream, b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return Ok::<(), std::io::Error>(());
+                }
                 let body = match path.as_str() {
                     "/upgrade-harness" if method == "POST" => {
                         let upgrading = shared.0.lock().map(|s| s.upgrading).unwrap_or(false);
