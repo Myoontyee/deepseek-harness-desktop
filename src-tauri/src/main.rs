@@ -733,9 +733,117 @@ fn inject_update_panel(window: &WebviewWindow) {
         loop {
             thread::sleep(Duration::from_secs(4));
             eval_js(&window, &format!("if (document.body) {{ {} }}", script));
+            eval_js(&window, &format!("if (document.body) {{ {} }}", CONTEXT_MENU_SCRIPT));
         }
     });
 }
+
+/// Session-tree context menu (Codex-style): right-click a conversation row to
+/// pin / rename / archive / copy working dir / copy session id / copy deep
+/// link / fork. Talks to the official HTTP API; session and workspace ids are
+/// resolved by matching titles against `list` responses.
+const CONTEXT_MENU_SCRIPT: &str = r#"
+(() => {
+  if (window.__DSH_CONTEXT_MENU__) return;
+  window.__DSH_CONTEXT_MENU__ = true;
+  const CSS = `
+    #dsh-ctx-menu{position:fixed;z-index:999999;min-width:190px;background:#fafafa;border:1px solid #e4e4e4;border-radius:8px;padding:6px;box-shadow:0 8px 28px rgba(0,0,0,.14);font-family:"Segoe UI","Microsoft YaHei",sans-serif;color:#111;font-size:12px;display:none}
+    #dsh-ctx-menu .item{padding:7px 10px;border-radius:5px;cursor:pointer;display:flex;align-items:center;gap:8px;letter-spacing:.02em}
+    #dsh-ctx-menu .item:hover{background:#ececec}
+    #dsh-ctx-menu .sep{height:1px;background:#e8e8e8;margin:4px 6px}
+    #dsh-ctx-menu .head{padding:5px 10px 8px;font-size:10px;letter-spacing:.1em;color:#999;border-bottom:1px solid #eee;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px}
+  `;
+  const style = document.createElement('style');
+  style.textContent = CSS;
+  document.documentElement.appendChild(style);
+  const menu = document.createElement('div');
+  menu.id = 'dsh-ctx-menu';
+  document.body.appendChild(menu);
+
+  const rpc = async (channel, method, payload) => {
+    const full = channel + '.' + method;
+    const res = await fetch('/api/' + full, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: crypto.randomUUID(), method: full, payload: payload || {} }),
+    });
+    const json = await res.json();
+    return json.result;
+  };
+  const copy = (text) => navigator.clipboard.writeText(text).catch(() => {});
+
+  let current = null; // { sessionId, title, cwd, workspaceId }
+
+  async function resolveSession(row) {
+    const titleEl = row.querySelector('.qM_tdG_title');
+    const title = titleEl ? titleEl.textContent.trim() : '';
+    // workspace = nearest ancestor project row
+    let proj = row.parentElement;
+    let workspaceTitle = '';
+    while (proj && !proj.classList.contains('qM_tdG_projectRow')) proj = proj.parentElement;
+    if (proj) workspaceTitle = proj.querySelector('.qM_tdG_title')?.textContent.trim() || '';
+    try {
+      const [w, s] = await Promise.all([
+        rpc('workspace', 'list', {}),
+        rpc('session', 'list', {}),
+      ]);
+      const ws = (w.items || []).find(x => x.title === workspaceTitle) || (w.items || [])[0];
+      const ids = ws ? ws.sessionIds : [];
+      const session = (s.items || []).find(x => x.sessionId && ids.includes(x.sessionId) && (x.title || '').trim() === title)
+        || (s.items || []).find(x => (x.title || '').trim() === title);
+      if (!session) return null;
+      return { sessionId: session.sessionId, title, cwd: ws ? ws.path : session.cwd, workspaceId: ws ? ws.workspaceId : undefined };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function showMenu(x, y, info) {
+    current = info;
+    const items = [
+      { label: '置顶聊天', fn: () => rpc('workspace', 'insertSessionBefore', { workspaceId: info.workspaceId, sessionId: info.sessionId }) },
+      { label: '重命名聊天', fn: () => { const t = prompt('重命名会话', info.title); if (t && t.trim()) return rpc('session', 'rename', { sessionId: info.sessionId, title: t.trim() }); } },
+      { label: '归档聊天', fn: () => rpc('workspace', 'archiveSession', { sessionId: info.sessionId }) },
+      { label: '创建聊天分支', fn: () => rpc('session', 'fork', { sessionId: info.sessionId }) },
+      { sep: true },
+      { label: '复制工作目录', fn: () => info.cwd ? copy(info.cwd) : null },
+      { label: '复制会话 ID', fn: () => copy(info.sessionId) },
+      { label: '复制深度链接', fn: () => copy('dsh-desktop://session/' + info.sessionId) },
+      { label: '在新窗口中打开', fn: () => copy('http://' + location.host + '/?session=' + info.sessionId) },
+    ];
+    menu.innerHTML = '<div class="head">' + (info.title || '') + '</div>' +
+      items.map(it => it.sep
+        ? '<div class="sep"></div>'
+        : '<div class="item">' + it.label + '</div>').join('');
+    menu.style.display = 'block';
+    menu.style.left = Math.min(x, window.innerWidth - 210) + 'px';
+    menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 8) + 'px';
+    const handlers = [];
+    let idx = 0;
+    for (const it of items) {
+      if (it.sep) continue;
+      const el = menu.children[idx + 1];
+      handlers.push(el.addEventListener('click', () => { hide(); Promise.resolve(it.fn()).then(() => setTimeout(() => location.reload(), 300)).catch(() => {}); }));
+      idx++;
+    }
+  }
+  function hide() { menu.style.display = 'none'; current = null; }
+
+  document.addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.qM_tdG_sessionRow');
+    if (!row) return;
+    e.preventDefault();
+    resolveSession(row).then(info => {
+      if (info) showMenu(e.clientX, e.clientY, info);
+    });
+  }, true);
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target)) hide();
+  });
+  window.addEventListener('blur', hide);
+  window.addEventListener('resize', hide);
+})();
+"#;
 
 /// Web boot watchdog: if the first page load races the plugin-module serving
 /// and the boot fails (whole plugin graph pending), the failure report is
