@@ -36,7 +36,7 @@ use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
 
 const SOURCE_URL: &str = "https://github.com/deepseek-ai/deepseek-harness.git";
 const SOURCE_BRANCH: &str = "master";
-const API_LATEST: &str = "https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/main";
+const API_LATEST: &str = "https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/master";
 const APP_DIR_NAME: &str = "DeepSeekHarness";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const DEFAULT_PORT: u16 = 3080;
@@ -633,6 +633,110 @@ fn server_plugins_ready(port: u16) -> bool {
     false
 }
 
+/// Inject the update panel (floating button + status card) into the loaded
+/// page. The page is a plain http origin without Tauri IPC, so the panel
+/// talks to the shell through the loopback bridge (port 3091) and the shell
+/// pushes progress via this same eval channel. Re-injection is idempotent
+/// (the script guards itself), so reloads are covered.
+fn inject_update_panel(window: &WebviewWindow) {
+    let script = r#"
+(() => {
+  if (window.__DSH_UPDATE_PANEL__) return;
+  window.__DSH_UPDATE_PANEL__ = true;
+  const BRIDGE = 'http://127.0.0.1:3091';
+  const host = document.createElement('div');
+  host.id = 'dsh-update-panel';
+  const style = document.createElement('style');
+  style.textContent = `
+    #dsh-update-panel{position:fixed;right:16px;bottom:16px;z-index:99999;font-family:"Segoe UI","Microsoft YaHei",sans-serif;color:#111;user-select:none}
+    #dsh-update-panel .fab{width:42px;height:42px;border-radius:50%;background:#fafafa;border:1px solid #ddd;box-shadow:0 2px 10px rgba(0,0,0,.12);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;transition:box-shadow .2s}
+    #dsh-update-panel .fab:hover{box-shadow:0 4px 16px rgba(0,0,0,.18)}
+    #dsh-update-panel .fab .dot{position:absolute;top:8px;right:8px;width:8px;height:8px;border-radius:50%;background:#e5484d;display:none}
+    #dsh-update-panel .card{display:none;position:absolute;right:0;bottom:54px;width:300px;background:#fafafa;border:1px solid #e4e4e4;border-radius:8px;padding:16px;box-shadow:0 8px 28px rgba(0,0,0,.12)}
+    #dsh-update-panel .card.open{display:block}
+    #dsh-update-panel .title{font-size:13px;letter-spacing:.08em;margin-bottom:12px;border-bottom:1px solid #e4e4e4;padding-bottom:8px}
+    #dsh-update-panel .row{display:flex;justify-content:space-between;font-size:12px;line-height:2}
+    #dsh-update-panel .row .cur{color:#666}
+    #dsh-update-panel .row .new{color:#e5484d;font-weight:600}
+    #dsh-update-panel .row .ok{color:#2e7d32}
+    #dsh-update-panel .btn{margin-top:12px;width:100%;padding:8px;background:#111;color:#fff;border:none;border-radius:4px;font-size:12px;cursor:pointer;letter-spacing:.08em}
+    #dsh-update-panel .btn:disabled{background:#bbb;cursor:default}
+    #dsh-update-panel .btn.ghost{background:#fafafa;color:#111;border:1px solid #ddd;margin-top:6px}
+    #dsh-update-panel .progress{margin-top:10px;height:3px;background:#e4e4e4;border-radius:2px;overflow:hidden;display:none}
+    #dsh-update-panel .progress i{display:block;height:100%;background:#111;width:0}
+    #dsh-update-panel .status{font-size:11px;color:#666;margin-top:8px;min-height:16px}
+  `;
+  host.innerHTML = `
+    <div class="fab" id="dsh-up-fab" title="检查更新">&#9881;<span class="dot" id="dsh-up-dot"></span></div>
+    <div class="card" id="dsh-up-card">
+      <div class="title">更新</div>
+      <div class="row"><span>桌面壳</span><span id="dsh-up-shell"></span></div>
+      <div class="row"><span>Harness 代码</span><span id="dsh-up-harness"></span></div>
+      <button class="btn" id="dsh-up-btn" disabled>检查中…</button>
+      <button class="btn ghost" id="dsh-up-release" style="display:none">下载桌面壳新版本</button>
+      <div class="progress" id="dsh-up-progress"><i></i></div>
+      <div class="status" id="dsh-up-status"></div>
+    </div>`;
+  document.documentElement.appendChild(style);
+  document.body.appendChild(host);
+  const $ = id => host.querySelector('#' + id);
+  let shellUpdate = false;
+  let harnessUpdate = false;
+  $('dsh-up-fab').addEventListener('click', () => $('dsh-up-card').classList.toggle('open'));
+  $('dsh-up-btn').addEventListener('click', () => {
+    if (harnessUpdate) {
+      fetch(BRIDGE + '/upgrade-harness', { method: 'POST' }).catch(() => {});
+      $('dsh-up-btn').disabled = true;
+      $('dsh-up-btn').textContent = '升级中…';
+    } else if (shellUpdate) {
+      fetch(BRIDGE + '/open-release', { method: 'POST' }).catch(() => {});
+    }
+  });
+  $('dsh-up-release').addEventListener('click', () => {
+    fetch(BRIDGE + '/open-release', { method: 'POST' }).catch(() => {});
+  });
+  async function refresh() {
+    try {
+      const r = await fetch(BRIDGE + '/status', { cache: 'no-store' });
+      const s = await r.json();
+      shellUpdate = s.shellLatest && s.shellCurrent !== s.shellLatest;
+      harnessUpdate = s.harnessLatest && s.harnessCurrent && s.harnessCurrent !== s.harnessLatest;
+      $('dsh-up-shell').innerHTML = s.shellCurrent + (shellUpdate ? ' → <span class="new">' + s.shellLatest + '</span>' : ' <span class="ok">✓</span>');
+      $('dsh-up-harness').innerHTML = s.harnessCurrent.slice(0, 8) + (harnessUpdate ? ' → <span class="new">' + s.harnessLatest.slice(0, 8) + '</span>' : (s.harnessLatest ? ' <span class="ok">✓</span>' : ''));
+      $('dsh-up-dot').style.display = (shellUpdate || harnessUpdate) ? 'block' : 'none';
+      $('dsh-up-release').style.display = shellUpdate ? 'block' : 'none';
+      const btn = $('dsh-up-btn');
+      if (s.upgrading) {
+        btn.disabled = true;
+        btn.textContent = '升级中…';
+        $('dsh-up-progress').style.display = 'block';
+        $('dsh-up-progress').querySelector('i').style.width = s.progress + '%';
+        $('dsh-up-status').textContent = s.status;
+      } else {
+        btn.disabled = !(shellUpdate || harnessUpdate);
+        btn.textContent = harnessUpdate ? '一键升级 Harness' : (shellUpdate ? '查看新版本' : '已是最新');
+        $('dsh-up-progress').style.display = 'none';
+        $('dsh-up-status').textContent = s.status || '';
+      }
+    } catch (e) {
+      $('dsh-up-status').textContent = '无法连接更新服务';
+    }
+  }
+  refresh();
+  setInterval(refresh, 5000);
+})();
+"#;
+    let window = window.clone();
+    std::thread::spawn(move || {
+        // Poll until the page is ready, then keep refreshing every few seconds
+        // so the panel survives page reloads.
+        loop {
+            thread::sleep(Duration::from_secs(4));
+            eval_js(&window, &format!("if (document.body) {{ {} }}", script));
+        }
+    });
+}
+
 /// Web boot watchdog: if the first page load races the plugin-module serving
 /// and the boot fails (whole plugin graph pending), the failure report is
 /// rendered by AppRoot with the literal "Failed to load plugins" title. Reload
@@ -934,10 +1038,286 @@ fn run(app: &AppHandle, window: WebviewWindow) {
     });
     // Belt and suspenders: if the first load still fails to boot, reload.
     watch_boot_failure(&window);
+
+    // Update bridge: version comparison + one-click upgrade from the injected
+    // panel. Runs against the local service; version lookups are best-effort.
+    let shared = SharedUpdate(std::sync::Mutex::new(UpdateSnapshot {
+        shell_current: env!("CARGO_PKG_VERSION").to_string(),
+        shell_latest: None,
+        harness_current: current_sha(git.as_deref(), &runtime).unwrap_or_default(),
+        harness_latest: None,
+        upgrading: false,
+        progress: 0,
+        status: String::new(),
+    }));
+    let (shell_latest, harness_latest) = check_updates();
+    if let Ok(mut s) = shared.0.lock() {
+        s.shell_latest = shell_latest;
+        s.harness_latest = harness_latest;
+    }
+    start_update_bridge(
+        shared,
+        app.clone(),
+        git.map(PathBuf::from),
+        runtime.clone(),
+        tools.clone(),
+        pnpm.clone(),
+        p,
+    );
+    inject_update_panel(&window);
 }
 
 /// The app-started server child (None when an already-running server was reused).
 struct ServerState(std::sync::Mutex<Option<std::process::Child>>);
+
+// --- update bridge -----------------------------------------------------------
+
+/// Snapshot of the version check, shared with the injected update panel.
+struct UpdateSnapshot {
+    shell_current: String,
+    shell_latest: Option<String>,
+    harness_current: String,
+    harness_latest: Option<String>,
+    upgrading: bool,
+    progress: u32,
+    status: String,
+}
+
+impl UpdateSnapshot {
+    fn json(&self) -> String {
+        format!(
+            "{{\"shellCurrent\":{},\"shellLatest\":{},\"harnessCurrent\":{},\"harnessLatest\":{},\"upgrading\":{},\"progress\":{},\"status\":{}}}",
+            js_string(&self.shell_current),
+            self.shell_latest.as_ref().map(|s| js_string(s)).unwrap_or_else(|| "null".into()),
+            js_string(&self.harness_current),
+            self.harness_latest.as_ref().map(|s| js_string(s)).unwrap_or_else(|| "null".into()),
+            self.upgrading,
+            self.progress,
+            js_string(&self.status),
+        )
+    }
+}
+
+struct SharedUpdate(std::sync::Mutex<UpdateSnapshot>);
+
+/// Best-effort GitHub lookups: latest release tag of this repo and the latest
+/// official master sha. Failures yield None (the panel shows "无法连接").
+fn check_updates() -> (Option<String>, Option<String>) {
+    let shell = ureq::get("https://api.github.com/repos/Myoontyee/deepseek-harness-desktop/releases/latest")
+        .set("User-Agent", USER_AGENT)
+        .timeout(Duration::from_secs(15))
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<serde_json::Value>().ok())
+        .and_then(|v| v.get("tag_name").and_then(|t| t.as_str()).map(|s| s.trim_start_matches('v').to_string()));
+    let harness = ureq::get("https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/master")
+        .set("User-Agent", USER_AGENT)
+        .timeout(Duration::from_secs(15))
+        .call()
+        .ok()
+        .and_then(|r| r.into_json::<serde_json::Value>().ok())
+        .and_then(|v| v.get("sha").and_then(|s| s.as_str()).map(str::to_string));
+    (shell, harness)
+}
+
+/// Hard-update the runtime ignoring DSH_SKIP_UPDATE (the panel upgrade path):
+/// git checkout refresh, or ZIP re-download when there is no .git.
+fn force_update_runtime(
+    git: Option<&Path>,
+    runtime: &Path,
+    on_status: &dyn Fn(&str),
+) -> Result<RuntimeState, String> {
+    if runtime.join(".git").exists() {
+        let git = git.ok_or("更新需要 git，但系统中没有找到 git")?;
+        on_status("正在拉取官方最新代码…");
+        git_out_timeout(git, runtime, &["fetch", "--depth", "1", "origin", SOURCE_BRANCH], Duration::from_secs(240))
+            .map_err(|e| format!("拉取更新失败：{e}"))?;
+        let head = git_out(git, runtime, &["rev-parse", "HEAD"]);
+        let fetched = git_out(git, runtime, &["rev-parse", "FETCH_HEAD"]);
+        if head.is_some() && fetched.is_some() && head != fetched {
+            on_status("发现新版本，正在更新…");
+            git_out_timeout(git, runtime, &["reset", "--hard", "FETCH_HEAD"], Duration::from_secs(120))
+                .map_err(|e| format!("更新代码失败：{e}"))?;
+            return Ok(RuntimeState::Updated);
+        }
+        return Ok(RuntimeState::Unchanged);
+    }
+    on_status("正在下载官方最新代码…");
+    let sha = latest_sha(git).unwrap_or_default();
+    download_zip(runtime, &sha)?;
+    Ok(RuntimeState::Fresh)
+}
+
+/// Run the full upgrade chain in the background: refresh code, reinstall
+/// deps when the revision changed, rebuild, restart the server, reload the
+/// page. Progress and status are written into `shared` (read by the panel).
+fn upgrade_harness(
+    app: AppHandle,
+    shared: SharedUpdate,
+    git: Option<PathBuf>,
+    runtime: PathBuf,
+    tools: PathBuf,
+    pnpm: PathBuf,
+    port: u16,
+) {
+    let progress = move |pct: u32, status: &str| {
+        if let Ok(mut s) = shared.0.lock() {
+            s.upgrading = true;
+            s.progress = pct;
+            s.status = status.to_string();
+        }
+    };
+    std::thread::spawn(move || {
+        progress(2, "正在拉取官方最新代码…");
+        let state = force_update_runtime(git.as_deref(), &runtime, &|s| progress(5, s));
+        let state = match state {
+            Ok(s) => s,
+            Err(e) => {
+                progress(100, &format!("更新失败：{e}"));
+                return;
+            }
+        };
+        let sha = current_sha(git.as_deref(), &runtime).unwrap_or_default();
+        if state != RuntimeState::Unchanged || !runtime.join("node_modules").exists() {
+            progress(15, "正在安装依赖（可能需要几分钟）…");
+            let window = app.get_webview_window("main");
+            let result = window
+                .map(|w| install_deps(&pnpm, &runtime, &tools, &w))
+                .unwrap_or(Ok(()));
+            if let Err(e) = result {
+                progress(100, &format!("安装依赖失败：{e}"));
+                return;
+            }
+        }
+        progress(40, "正在构建（可能需要 10-20 分钟）…");
+        let window = app.get_webview_window("main");
+        let result = window
+            .map(|w| build_repo(&pnpm, &runtime, &tools, &sha, &w))
+            .unwrap_or(Ok(()));
+        if let Err(e) = result {
+            progress(100, &format!("构建失败：{e}"));
+            return;
+        }
+        // Restart the server so the new code takes effect.
+        progress(85, "正在重启服务…");
+        if let Some(state) = app.try_state::<ServerState>() {
+            let child = {
+                let mut guard = state.0.lock().expect("server slot lock");
+                guard.take()
+            };
+            if let Some(child) = child {
+                kill_tree(child.id());
+            }
+            let mut slot = state.0.lock().expect("server slot lock");
+            *slot = start_server(&pnpm, &runtime, &tools, port);
+        }
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        while Instant::now() < deadline {
+            if server_ready(port) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(750));
+        }
+        progress(100, if server_ready(port) { "更新完成 ✓" } else { "服务重启失败，请手动重新打开应用" });
+        if let Some(window) = app.get_webview_window("main") {
+            // Reload the page against the restarted server.
+            thread::sleep(Duration::from_secs(1));
+            eval_js(&window, "location.reload()");
+        }
+    });
+}
+
+/// Tiny loopback HTTP bridge the injected update panel talks to:
+///   GET  /status            -> UpdateSnapshot JSON
+///   POST /upgrade-harness   -> start the background upgrade (202)
+///   POST /open-release      -> open this repo's Releases page
+fn start_update_bridge(
+    shared: SharedUpdate,
+    app: AppHandle,
+    git: Option<PathBuf>,
+    runtime: PathBuf,
+    tools: PathBuf,
+    pnpm: PathBuf,
+    port: u16,
+) {
+    std::thread::spawn(move || {
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", 3091)) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        for stream in listener.incoming().flatten() {
+            let shared = shared.clone_inner_for_bridge();
+            let app = app.clone();
+            let git = git.clone();
+            let runtime = runtime.clone();
+            let tools = tools.clone();
+            let pnpm = pnpm.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let method = line.split_whitespace().next().unwrap_or("").to_string();
+                let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = match path.as_str() {
+                    "/upgrade-harness" if method == "POST" => {
+                        let upgrading = shared.0.lock().map(|s| s.upgrading).unwrap_or(false);
+                        if !upgrading {
+                            upgrade_harness(app, shared, git, runtime, tools, pnpm, port);
+                            "HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string()
+                        } else {
+                            "HTTP/1.1 409 Conflict\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno".to_string()
+                        }
+                    }
+                    "/open-release" if method == "POST" => {
+                        #[cfg(windows)]
+                        let _ = Command::new("cmd")
+                            .args(["/c", "start", "", "https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest"])
+                            .creation_flags(0x0800_0000)
+                            .spawn();
+                        #[cfg(not(windows))]
+                        let _ = Command::new("open").arg("https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest").spawn();
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string()
+                    }
+                    "/status" => {
+                        let json = shared.0.lock().map(|s| s.json()).unwrap_or_else(|_| "{}".into());
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", json.len(), json)
+                    }
+                    _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno".to_string(),
+                };
+                let _ = std::io::Write::write_all(&mut stream, body.as_bytes());
+                Ok::<(), std::io::Error>(())
+            });
+        }
+    });
+}
+
+trait CloneForBridge {
+    fn clone_inner_for_bridge(&self) -> Self;
+}
+impl CloneForBridge for SharedUpdate {
+    fn clone_inner_for_bridge(&self) -> Self {
+        SharedUpdate(std::sync::Mutex::new(
+            self.0.lock().map(|s| UpdateSnapshot {
+                shell_current: s.shell_current.clone(),
+                shell_latest: s.shell_latest.clone(),
+                harness_current: s.harness_current.clone(),
+                harness_latest: s.harness_latest.clone(),
+                upgrading: s.upgrading,
+                progress: s.progress,
+                status: s.status.clone(),
+            }).unwrap_or_else(|_| UpdateSnapshot {
+                shell_current: String::new(),
+                shell_latest: None,
+                harness_current: String::new(),
+                harness_latest: None,
+                upgrading: false,
+                progress: 0,
+                status: String::new(),
+            }),
+        ))
+    }
+}
 
 fn main() {
     let server = ServerState(std::sync::Mutex::new(None));
