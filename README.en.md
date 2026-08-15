@@ -39,10 +39,10 @@
 
 | Platform | Architecture | Package | Download |
 | --- | --- | --- | --- |
-| Windows | x64 | Setup installer (95MB, bundled runtime + source snapshot) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_x64-setup.exe) |
-| macOS | Apple Silicon | DMG (73MB) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_aarch64.dmg) |
-| Linux | x64 | AppImage (141MB) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_amd64.AppImage) |
-| Debian / Ubuntu | x64 | deb (82MB) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_amd64.deb) |
+| Windows | x64 | Setup installer (95MB, bundled runtime + source snapshot) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_x64-setup.exe) |
+| macOS | Apple Silicon | DMG (73MB) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_aarch64.dmg) |
+| Linux | x64 | AppImage (141MB) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_amd64.AppImage) |
+| Debian / Ubuntu | x64 | deb (82MB) | [Download](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_amd64.deb) |
 
 All historical versions: [GitHub Releases](https://github.com/Myoontyee/deepseek-harness-desktop/releases).
 
@@ -121,16 +121,16 @@ pnpm dlx @tauri-apps/cli@2 build
 
 ## 🏷️ Version policy
 
-The desktop shell version tracks the official repo version one-to-one:
+The desktop shell version evolves **independently** (since `1.0.0`), decoupled from the official repo version:
 
 | Place | Source |
 | --- | --- |
-| Official repo `deepseek-ai/deepseek-harness` | `version` in `package.json` (e.g. `0.1.0-rc.5`) |
-| This repo git tag | `v<official version>` |
-| Shell `tauri.conf.json` / `Cargo.toml` | matches the official version |
+| Desktop shell (this repo) | independent version `1.0.0` (Cargo.toml / tauri.conf.json) |
+| This repo git tag | `v<shell version>` (e.g. `v1.0.0`) |
+| Harness (official) | `version` in `package.json` (e.g. `0.1.0-rc.5`), follows upstream |
 | Boot page | dynamic `Harness <official> · Desktop <shell>` |
 
-**Release flow**: push a `v*` tag → CI builds Windows/macOS/Linux installers → GitHub Release published.
+**Release flow**: iterate shell features → bump shell version → push a `v*` tag → CI builds Windows/macOS/Linux installers → GitHub Release published. Official code updates are synced by the in-app one-click upgrade, independent of shell releases.
 
 ## ⚙️ Environment variables
 

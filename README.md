@@ -39,10 +39,10 @@
 
 | 平台 | 架构 | 安装包 | 下载 |
 | --- | --- | --- | --- |
-| Windows | x64 | Setup 安装器（95MB，内置运行环境与源码快照） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_x64-setup.exe) |
-| macOS | Apple Silicon | DMG（73MB） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_aarch64.dmg) |
-| Linux | x64 | AppImage（141MB） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_amd64.AppImage) |
-| Debian / Ubuntu | x64 | deb（82MB） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_0.1.0-rc.5_amd64.deb) |
+| Windows | x64 | Setup 安装器（95MB，内置运行环境与源码快照） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_x64-setup.exe) |
+| macOS | Apple Silicon | DMG（73MB） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_aarch64.dmg) |
+| Linux | x64 | AppImage（141MB） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_amd64.AppImage) |
+| Debian / Ubuntu | x64 | deb（82MB） | [下载](https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest/download/DeepSeek.Harness_1.0.0_amd64.deb) |
 
 所有历史版本见 [GitHub Releases](https://github.com/Myoontyee/deepseek-harness-desktop/releases)。
 
@@ -122,16 +122,16 @@ pnpm dlx @tauri-apps/cli@2 build
 
 ## 🏷️ 版本策略
 
-桌面壳版本号与官方代码仓版本号**一一对应**：
+桌面壳版本号**独立演进**（自 `1.0.0` 起），与官方代码仓版本**解耦**：
 
 | 位置 | 版本来源 |
 | --- | --- |
-| 官方代码仓 `deepseek-ai/deepseek-harness` | `package.json` 的 `version`（如 `0.1.0-rc.5`） |
-| 本仓库 git tag | `v<官方版本>` |
-| 桌面壳 `tauri.conf.json` / `Cargo.toml` | 与官方版本一致 |
-| 启动页封面 | 动态显示 `Harness <官方版本> · Desktop <本仓版本>` |
+| 桌面壳（本仓库） | 独立版本号 `1.0.0`（Cargo.toml / tauri.conf.json） |
+| 本仓库 git tag | `v<壳版本>`（如 `v1.0.0`） |
+| Harness（官方） | `package.json` 的 `version`（如 `0.1.0-rc.5`），随官方演进 |
+| 启动页封面 | 动态显示 `Harness <官方版本> · Desktop <壳版本>` |
 
-**发版流程**：打 `v*` tag → CI 自动构建 Windows/macOS/Linux 安装包 → 发布 GitHub Release。
+**发版流程**：壳功能迭代 → 提升壳版本 → 打 `v*` tag → CI 自动构建 Windows/macOS/Linux 安装包 → 发布 GitHub Release。官方代码更新由应用内「一键升级」自动同步，不依赖壳发版。
 
 ## ⚙️ 环境变量
 
