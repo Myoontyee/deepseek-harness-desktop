@@ -27,6 +27,8 @@
   <a href="https://github.com/deepseek-ai/deepseek-harness"><strong>DeepSeek Harness 官方源码仓</strong></a>
 </p>
 
+<p align="center"><strong>简体中文</strong> · <a href="README.en.md">English</a></p>
+
 ---
 
 ## 📸 预览
