@@ -7,3 +7,4 @@ tools/
 main/
 src-tauri/dsh-runtime-snapshot.zip
 SetupBackage/
+.playwright-cli/
