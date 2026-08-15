@@ -693,10 +693,15 @@ fn fallback_port(preferred: u16) -> u16 {
 }
 
 /// Start `pnpm dsh web`, redirecting its output to `server.log` for
-/// diagnostics. On Windows no console window is created (CREATE_NO_WINDOW) and
-/// the server is spawned in its own process group so the whole tree can be
-/// killed on exit; on macOS/Linux the server runs in the foreground process
-/// group of the app (no extra console concept exists there).
+/// diagnostics.
+///
+/// On Windows the server runs in its own console window that is hidden right
+/// after startup: `CREATE_NO_WINDOW` would silently break native host dialogs
+/// (the workspace directory picker spawns a worker whose `IFileOpenDialog`
+/// cannot show without a real console/desktop environment), while a visible
+/// console is ugly. The console title doubles as the finder key for hiding.
+/// On macOS/Linux the server runs in the foreground process group (no extra
+/// console concept exists there).
 ///
 /// The server is spawned directly (no cmd/`start` indirection, so no shell
 /// quoting pitfalls) and its lifecycle is tied to the app: when the app
@@ -713,10 +718,53 @@ fn start_server(pnpm: &Path, runtime: &Path, tools: &Path, port: u16) -> Option<
         .stdout(stdout)
         .stderr(stderr);
     #[cfg(windows)]
-    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console, ever
+    {
+        command.creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE: own console we can hide
+    }
     #[cfg(not(windows))]
     command.process_group(0); // own process group so kill_tree can stop the tree
-    command.spawn().ok()
+    let child = command.spawn().ok()?;
+    #[cfg(windows)]
+    hide_server_console(child.id());
+    Some(child)
+}
+
+/// Hide the server's console window shortly after spawn. The window title is
+/// the pnpm/node process name, so find the console by the process's window
+/// via `GetConsoleWindow` in a child helper is fragile; instead we locate the
+/// top-level window whose process id matches the server pid.
+#[cfg(windows)]
+fn hide_server_console(pid: u32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        unsafe {
+            use windows_sys::Win32::Foundation::HWND;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{
+                EnumWindows, GetWindowThreadProcessId, IsWindowVisible, ShowWindow,
+            };
+            struct FindCtx {
+                pid: u32,
+                found: HWND,
+            }
+            let mut ctx = FindCtx { pid, found: std::ptr::null_mut() };
+            extern "system" fn find_by_pid(hwnd: HWND, lparam: isize) -> i32 {
+                unsafe {
+                    let ctx = &mut *(lparam as *mut FindCtx);
+                    let mut window_pid: u32 = 0;
+                    GetWindowThreadProcessId(hwnd, &mut window_pid);
+                    if window_pid == ctx.pid && IsWindowVisible(hwnd) != 0 {
+                        ctx.found = hwnd;
+                        return 0; // stop enumerating
+                    }
+                }
+                1 // continue
+            }
+            EnumWindows(Some(find_by_pid), &mut ctx as *mut FindCtx as isize);
+            if !ctx.found.is_null() {
+                ShowWindow(ctx.found, 0); // SW_HIDE
+            }
+        }
+    });
 }
 
 /// Kill a process tree used to stop the server together with the app.

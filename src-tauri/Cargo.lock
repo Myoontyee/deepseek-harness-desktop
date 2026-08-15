@@ -853,6 +853,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "ureq",
+ "windows-sys 0.59.0",
  "winreg",
  "zip",
 ]
