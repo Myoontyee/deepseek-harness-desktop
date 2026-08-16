@@ -372,6 +372,39 @@ fn extract_zip_into(
     Ok(())
 }
 
+/// Copy every non-directory entry of `archive` into `dest` as a plain file.
+/// Symlink entries are written as regular files: the zip crate's high-level
+/// `extract()` materializes them as real symlinks, which fails with os error
+/// 1314 ("a required privilege is not held by the client") on accounts
+/// without SeCreateSymbolicLinkPrivilege. GitHub codeload zips preserve the
+/// repo's symlinks (e.g. CLAUDE.md), so the fallback download must not use it.
+fn extract_archive_flat(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    dest: &Path,
+) -> Result<(), String> {
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取代码条目失败：{e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.enclosed_name() else {
+            continue;
+        };
+        let out_path = dest.join(name);
+        if let Some(parent_dir) = out_path.parent() {
+            std::fs::create_dir_all(parent_dir)
+                .map_err(|e| format!("创建目录失败：{e}"))?;
+        }
+        let mut out = std::fs::File::create(&out_path)
+            .map_err(|e| format!("写入代码失败：{e}"))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("写入代码失败：{e}"))?;
+    }
+    Ok(())
+}
+
 /// Download the repository as a ZIP (codeload) and extract it into `runtime`,
 /// recording the revision so later launches can skip the download.
 fn download_zip(runtime: &Path, sha: &str) -> Result<(), String> {
@@ -402,7 +435,7 @@ fn download_zip(runtime: &Path, sha: &str) -> Result<(), String> {
         .by_index(0)
         .map(|f| f.name().to_string())
         .unwrap_or_default();
-    archive.extract(parent).map_err(|e| format!("解压失败：{e}"))?;
+    extract_archive_flat(&mut archive, parent).map_err(|e| format!("解压失败：{e}"))?;
     let _ = std::fs::remove_file(&zip_path);
 
     let inner = parent.join(inner_name.trim_end_matches('/'));
