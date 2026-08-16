@@ -1380,9 +1380,9 @@ fn start_update_bridge(
                         let upgrading = shared.0.lock().map(|s| s.upgrading).unwrap_or(false);
                         if !upgrading {
                             upgrade_harness(app, shared, git, runtime, tools, pnpm, port);
-                            "HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string()
+                            format!("HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nok")
                         } else {
-                            "HTTP/1.1 409 Conflict\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno".to_string()
+                            format!("HTTP/1.1 409 Conflict\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nno")
                         }
                     }
                     "/open-release" if method == "POST" => {
@@ -1393,13 +1393,13 @@ fn start_update_bridge(
                             .spawn();
                         #[cfg(not(windows))]
                         let _ = Command::new("open").arg("https://github.com/Myoontyee/deepseek-harness-desktop/releases/latest").spawn();
-                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string()
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nok")
                     }
                     "/status" => {
                         let json = shared.0.lock().map(|s| s.json()).unwrap_or_else(|_| "{}".into());
-                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", json.len(), json)
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close{CORS}\r\n\r\n{}", json.len(), json)
                     }
-                    _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno".to_string(),
+                    _ => format!("HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nno"),
                 };
                 let _ = std::io::Write::write_all(&mut stream, body.as_bytes());
                 Ok::<(), std::io::Error>(())
