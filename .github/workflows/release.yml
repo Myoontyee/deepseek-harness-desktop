@@ -81,7 +81,7 @@ jobs:
         run: |
           curl -sL --fail --retry 3 --connect-timeout 30 \
             -o src-tauri/dsh-runtime-snapshot.zip \
-            'https://codeload.github.com/deepseek-ai/deepseek-harness/zip/refs/heads/master'
+            'https://codeload.github.com/Myoontyee/deepseek-harness/zip/refs/heads/master'
           ls -la src-tauri/dsh-runtime-snapshot.zip
 
       - name: Build installer

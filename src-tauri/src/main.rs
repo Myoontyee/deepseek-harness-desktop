@@ -34,9 +34,9 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
 
-const SOURCE_URL: &str = "https://github.com/deepseek-ai/deepseek-harness.git";
+const SOURCE_URL: &str = "https://github.com/Myoontyee/deepseek-harness.git";
 const SOURCE_BRANCH: &str = "master";
-const API_LATEST: &str = "https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/master";
+const API_LATEST: &str = "https://api.github.com/repos/Myoontyee/deepseek-harness/commits/master";
 const APP_DIR_NAME: &str = "DeepSeekHarness";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const DEFAULT_PORT: u16 = 3080;
@@ -410,7 +410,7 @@ fn extract_archive_flat(
 fn download_zip(runtime: &Path, sha: &str) -> Result<(), String> {
     let parent = runtime.parent().ok_or("runtime 路径没有父目录")?;
     let url = format!(
-        "https://codeload.github.com/deepseek-ai/deepseek-harness/zip/refs/heads/{SOURCE_BRANCH}"
+        "https://codeload.github.com/Myoontyee/deepseek-harness/zip/refs/heads/{SOURCE_BRANCH}"
     );
     let response = ureq::get(&url)
         .set("User-Agent", USER_AGENT)
@@ -1251,7 +1251,7 @@ fn check_updates() -> (Option<String>, Option<String>) {
         .ok()
         .and_then(|r| r.into_json::<serde_json::Value>().ok())
         .and_then(|v| v.get("tag_name").and_then(|t| t.as_str()).map(|s| s.trim_start_matches('v').to_string()));
-    let harness = ureq::get("https://api.github.com/repos/deepseek-ai/deepseek-harness/commits/master")
+    let harness = ureq::get("https://api.github.com/repos/Myoontyee/deepseek-harness/commits/master")
         .set("User-Agent", USER_AGENT)
         .timeout(Duration::from_secs(15))
         .call()
