@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2021"
 description = "DeepSeek Harness desktop entry: always-latest runtime host with its own WebView2 window."
 license = "MIT"
