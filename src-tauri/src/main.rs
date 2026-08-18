@@ -407,7 +407,13 @@ fn extract_archive_flat(
 
 /// Download the repository as a ZIP (codeload) and extract it into `runtime`,
 /// recording the revision so later launches can skip the download.
-fn download_zip(runtime: &Path, sha: &str) -> Result<(), String> {
+/// `on_progress` receives (downloaded_bytes, total_bytes) when the server
+/// advertises a content length; a None callback skips progress reporting.
+fn download_zip(
+    runtime: &Path,
+    sha: &str,
+    on_progress: Option<&dyn Fn(u64, u64)>,
+) -> Result<(), String> {
     let parent = runtime.parent().ok_or("runtime 路径没有父目录")?;
     let url = format!(
         "https://codeload.github.com/Myoontyee/deepseek-harness/zip/refs/heads/{SOURCE_BRANCH}"
@@ -417,12 +423,27 @@ fn download_zip(runtime: &Path, sha: &str) -> Result<(), String> {
         .timeout(Duration::from_secs(120))
         .call()
         .map_err(|e| format!("下载失败：{e}"))?;
+    let total = response
+        .header("Content-Length")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let mut reader = response.into_reader().take(2 * 1024 * 1024 * 1024);
     let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(2 * 1024 * 1024 * 1024)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("读取下载内容失败：{e}"))?;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("读取下载内容失败：{e}"))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if total > 0 {
+            if let Some(cb) = on_progress {
+                cb(bytes.len() as u64, total);
+            }
+        }
+    }
     if bytes.is_empty() {
         return Err("下载内容为空（网络可能不可达）".into());
     }
@@ -491,7 +512,7 @@ fn ensure_runtime(
             return Ok(RuntimeState::Unchanged);
         }
         on_status("发现新版本，正在下载…");
-        download_zip(runtime, &sha)?;
+        download_zip(runtime, &sha, None)?;
         Ok(RuntimeState::Fresh)
     } else {
         if skip_update() {
@@ -546,7 +567,7 @@ fn ensure_runtime(
         // ZIP fallback: works without git and survives git-specific failures.
         on_status("正在通过备用通道下载…");
         let sha = latest_sha(git).unwrap_or_default();
-        match download_zip(runtime, &sha) {
+        match download_zip(runtime, &sha, None) {
             Ok(()) => Ok(RuntimeState::Fresh),
             Err(error) => Err(format!(
                 "下载代码失败：git clone 失败（{}），备用下载也失败（{}）",
@@ -722,7 +743,9 @@ fn inject_update_panel(window: &WebviewWindow) {
       $('dsh-up-btn').disabled = true;
       $('dsh-up-btn').textContent = '升级中…';
     } else if (shellUpdate) {
-      fetch(BRIDGE + '/open-release', { method: 'POST' }).catch(() => {});
+      fetch(BRIDGE + '/upgrade-shell', { method: 'POST' }).catch(() => {});
+      $('dsh-up-btn').disabled = true;
+      $('dsh-up-btn').textContent = '升级中…';
     }
   });
   $('dsh-up-release').addEventListener('click', () => {
@@ -747,7 +770,7 @@ fn inject_update_panel(window: &WebviewWindow) {
         $('dsh-up-status').textContent = s.status;
       } else {
         btn.disabled = !(shellUpdate || harnessUpdate);
-        btn.textContent = harnessUpdate ? '一键升级 Harness' : (shellUpdate ? '查看新版本' : '已是最新');
+        btn.textContent = harnessUpdate ? '一键升级 Harness' : (shellUpdate ? '一键升级桌面壳' : '已是最新');
         $('dsh-up-progress').style.display = 'none';
         $('dsh-up-status').textContent = s.status || '';
       }
@@ -1267,6 +1290,7 @@ fn force_update_runtime(
     git: Option<&Path>,
     runtime: &Path,
     on_status: &dyn Fn(&str),
+    on_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<RuntimeState, String> {
     if runtime.join(".git").exists() {
         let git = git.ok_or("更新需要 git，但系统中没有找到 git")?;
@@ -1285,7 +1309,7 @@ fn force_update_runtime(
     }
     on_status("正在下载官方最新代码…");
     let sha = latest_sha(git).unwrap_or_default();
-    download_zip(runtime, &sha)?;
+    download_zip(runtime, &sha, on_progress)?;
     Ok(RuntimeState::Fresh)
 }
 
@@ -1310,7 +1334,15 @@ fn upgrade_harness(
     };
     std::thread::spawn(move || {
         progress(2, "正在拉取官方最新代码…");
-        let state = force_update_runtime(git.as_deref(), &runtime, &|s| progress(5, s));
+        let state = force_update_runtime(
+            git.as_deref(),
+            &runtime,
+            &|s| progress(5, s),
+            Some(&|downloaded, total| {
+                let pct = (5 + downloaded.saturating_mul(35) / total.max(1)) as u32;
+                progress(pct.min(40), &format!("正在下载 Harness 代码… {}/{} MB", downloaded / 1024 / 1024, total / 1024 / 1024));
+            }),
+        );
         let state = match state {
             Ok(s) => s,
             Err(e) => {
@@ -1368,6 +1400,131 @@ fn upgrade_harness(
     });
 }
 
+/// One-click shell upgrade: download the latest installer for this platform
+/// from the GitHub Release, run it (silent on Windows), then exit the app so
+/// the installer can take over. Progress flows through `SharedUpdate`.
+fn upgrade_shell(app: AppHandle, shared: SharedUpdate) {
+    let progress = move |pct: u32, status: &str| {
+        if let Ok(mut s) = shared.0.lock() {
+            s.upgrading = true;
+            s.progress = pct;
+            s.status = status.to_string();
+        }
+    };
+    std::thread::spawn(move || {
+        progress(2, "正在检查最新版本…");
+        let latest = ureq::get("https://api.github.com/repos/Myoontyee/deepseek-harness-desktop/releases/latest")
+            .set("User-Agent", USER_AGENT)
+            .timeout(Duration::from_secs(15))
+            .call()
+            .ok()
+            .and_then(|r| r.into_json::<serde_json::Value>().ok());
+        let Some(latest) = latest else {
+            progress(100, "获取版本信息失败，请检查网络后重试");
+            return;
+        };
+        let version = latest.get("tag_name").and_then(|t| t.as_str()).unwrap_or("").trim_start_matches('v');
+        if version.is_empty() {
+            progress(100, "获取版本信息失败，请检查网络后重试");
+            return;
+        }
+        // Platform installer asset (mirrors the dsh-install-desktop plugin rules).
+        #[cfg(target_os = "windows")]
+        let asset_name = format!("DeepSeek.Harness_{version}_x64-setup.exe");
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        let asset_name = format!("DeepSeek.Harness_{version}_aarch64.dmg");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        let asset_name = format!("DeepSeek.Harness_{version}_amd64.AppImage");
+        #[cfg(not(any(target_os = "windows", all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", target_arch = "x86_64"))))]
+        let asset_name = String::new();
+        if asset_name.is_empty() {
+            progress(100, "当前平台暂不支持一键升级，请从 GitHub Release 手动下载");
+            return;
+        }
+        let download_url = latest
+            .get("assets")
+            .and_then(|a| a.as_array())
+            .and_then(|assets| assets.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(asset_name.as_str())))
+            .and_then(|a| a.get("browser_download_url").and_then(|u| u.as_str()))
+            .map(str::to_string);
+        let Some(download_url) = download_url else {
+            progress(100, &format!("v{version} 未找到适用于本平台的安装包"));
+            return;
+        };
+        // Download to the temp dir next to the exe (installers copy from there).
+        let dest = std::env::temp_dir().join(&asset_name);
+        progress(5, &format!("正在下载桌面壳 v{version}…"));
+        let response = match ureq::get(&download_url)
+            .set("User-Agent", USER_AGENT)
+            .timeout(Duration::from_secs(600))
+            .call()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                progress(100, &format!("下载失败：{e}"));
+                return;
+            }
+        };
+        let total = response.header("Content-Length").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        let mut reader = response.into_reader();
+        let mut file = match std::fs::File::create(&dest) {
+            Ok(f) => f,
+            Err(e) => {
+                progress(100, &format!("写入文件失败：{e}"));
+                return;
+            }
+        };
+        let mut buf = [0u8; 64 * 1024];
+        let mut written: u64 = 0;
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if file.write_all(&buf[..n]).is_err() {
+                        progress(100, "写入文件失败");
+                        return;
+                    }
+                    written += n as u64;
+                    if total > 0 {
+                        let pct = (5 + written.saturating_mul(85) / total.max(1)) as u32;
+                        progress(pct.min(90), &format!("正在下载桌面壳 v{version}… {}/{} MB", written / 1024 / 1024, total / 1024 / 1024));
+                    }
+                }
+                Err(e) => {
+                    progress(100, &format!("下载失败：{e}"));
+                    return;
+                }
+            }
+        }
+        progress(92, "正在安装新版本…");
+        #[cfg(target_os = "windows")]
+        {
+            // NSIS silent install with an explicit /D= (this installer family
+            // skips silently without it). The v1.0.4+ install hooks kill the
+            // running app tree, so exiting here is safe.
+            let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+            let install_dir = base.join("DeepSeek Harness");
+            let _ = Command::new(&dest)
+                .args(["/S", &format!("/D={}", install_dir.to_string_lossy())])
+                .creation_flags(0x0800_0000)
+                .spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("open").arg(&dest).spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+            let _ = Command::new(&dest).spawn();
+        }
+        progress(100, &format!("安装程序已启动，即将升级到 v{version}"));
+        thread::sleep(Duration::from_secs(2));
+        app.exit(0);
+    });
+}
+
 /// Tiny loopback HTTP bridge the injected update panel talks to:
 ///   GET  /status            -> UpdateSnapshot JSON
 ///   POST /upgrade-harness   -> start the background upgrade (202)
@@ -1413,6 +1570,15 @@ fn start_update_bridge(
                         let upgrading = shared.0.lock().map(|s| s.upgrading).unwrap_or(false);
                         if !upgrading {
                             upgrade_harness(app, shared, git, runtime, tools, pnpm, port);
+                            format!("HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nok")
+                        } else {
+                            format!("HTTP/1.1 409 Conflict\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nno")
+                        }
+                    }
+                    "/upgrade-shell" if method == "POST" => {
+                        let upgrading = shared.0.lock().map(|s| s.upgrading).unwrap_or(false);
+                        if !upgrading {
+                            upgrade_shell(app, shared);
                             format!("HTTP/1.1 202 Accepted\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nok")
                         } else {
                             format!("HTTP/1.1 409 Conflict\r\nContent-Length: 2\r\nConnection: close{CORS}\r\n\r\nno")
